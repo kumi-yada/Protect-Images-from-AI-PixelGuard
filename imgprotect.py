@@ -1,3 +1,4 @@
+import sys
 import numpy as np
 import cv2
 from PIL import Image
@@ -22,6 +23,7 @@ import torchvision.transforms as transforms
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
+
 class AdvancedImageProtector:
     def __init__(self):
         self.private_key = rsa.generate_private_key(
@@ -30,21 +32,13 @@ class AdvancedImageProtector:
         )
         self.public_key = self.private_key.public_key()
         self.supported_formats = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}
-        
+
         # Load pre-trained ResNet50 model
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = models.resnet50(pretrained=True).to(self.device)
         self.model.eval()
-        
-        # Define image preprocessing
-        self.preprocess = transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
 
-    def protect_image(self, image_path, output_dir='protected_images', dct_strength=0.05, wavelet_strength=0.05, fourier_strength=0.05, adversarial_strength=0.01, qr_opacity=0.05):
+    def protect_image(self, image_path, output_dir='protected_images', dct_strength=0.0, wavelet_strength=0.0, fourier_strength=0.0, adversarial_strength=0.0, qr_opacity=0.0, color_jitter_amount=0.0, noise_strength=0.0, new_width=512):
         try:
             os.makedirs(output_dir, exist_ok=True)
             logging.debug(f"Processing image: {image_path}")
@@ -54,25 +48,40 @@ class AdvancedImageProtector:
                 return f"Unsupported file format: {file_extension}"
 
             # Read image using PIL to ensure consistency
+            width, height = 0, 0
             with Image.open(image_path) as img:
+                width = img.width
+                height = img.height
+
                 original_exif = img.info.get('exif', b'')
                 image = np.array(img)
                 if len(image.shape) == 2:  # Convert grayscale to RGB
                     image = np.stack((image,)*3, axis=-1)
                 elif image.shape[2] == 4:  # Remove alpha channel if present
-                    image = image[:,:,:3]
-            
+                    image = image[:, :, :3]
+            # Define image preprocessing
+            ratio = width / height
+
+            self.preprocess = transforms.Compose([
+                transforms.Resize((new_width, int(new_width * ratio))),
+                # transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                # transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), # Makes it blue?
+            ])
+
             # Convert to BGR for OpenCV operations
             image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-            
+
             # Apply multiple protection techniques with custom strengths
             protected_image = self.apply_dct_watermark(image, strength=dct_strength)
             protected_image = self.apply_wavelet_watermark(protected_image, strength=wavelet_strength)
             protected_image = self.apply_fourier_watermark(protected_image, strength=fourier_strength)
             protected_image = self.apply_adversarial_perturbation(protected_image, epsilon=adversarial_strength)
-            protected_image = self.apply_color_jittering(protected_image)
+            protected_image = self.apply_color_jittering(protected_image, color_jitter_amount)
             protected_image = self.apply_invisible_qr(protected_image, opacity=qr_opacity)
             protected_image = self.apply_steganography(protected_image)
+
+            protected_image = self.apply_noise(protected_image, epsilon=noise_strength)
 
             # Generate signature and hash AFTER all protections are applied
             image_bytes = cv2.imencode('.png', protected_image)[1].tobytes()
@@ -90,10 +99,10 @@ class AdvancedImageProtector:
 
             # Save the protected image
             final_image_path = os.path.join(output_dir, f'protected_{os.path.basename(image_path)}')
-            
+
             # Convert back to PIL Image for saving
             pil_image = Image.fromarray(cv2.cvtColor(protected_image, cv2.COLOR_BGR2RGB))
-            
+
             # Embed protection info based on file type
             if file_extension.lower() in ['.jpg', '.jpeg']:
                 # For JPEG, use EXIF
@@ -114,103 +123,128 @@ class AdvancedImageProtector:
             logging.error(f"Error processing image: {str(e)}", exc_info=True)
             return f"Error processing image {image_path}: {str(e)}"
 
+    def apply_noise(self, image, epsilon):
+        logging.debug("Applying noise")
+
+        # Generate random noise with the same shape as the image
+        noise = np.random.uniform(low=-epsilon, high=epsilon, size=image.shape)
+
+        # Add noise to the image
+        noisy_image = image + noise
+
+        # Clip the pixel values to the valid range [0, 255]
+        noisy_image = np.clip(noisy_image, 0, 255).astype(np.uint8)
+
+        return noisy_image
+
     def apply_dct_watermark(self, image, strength):
         logging.debug("Applying DCT watermark")
-        blue_channel = image[:,:,0].astype(float)
+        blue_channel = image[:, :, 0].astype(float)
         dct_blue = dct(dct(blue_channel.T, norm='ortho').T, norm='ortho')
-        
+
         np.random.seed(42)
         watermark = np.random.normal(0, 2, blue_channel.shape)
-        
+
         dct_blue += strength * watermark
-        
+
         blue_channel_watermarked = idct(idct(dct_blue.T, norm='ortho').T, norm='ortho')
-        image[:,:,0] = np.clip(blue_channel_watermarked, 0, 255).astype(np.uint8)
-        
+        image[:, :, 0] = np.clip(blue_channel_watermarked, 0, 255).astype(np.uint8)
+
         return image
 
     def apply_wavelet_watermark(self, image, strength):
         logging.debug("Applying wavelet watermark")
-        green_channel = image[:,:,1].astype(float)
+        green_channel = image[:, :, 1].astype(float)
         coeffs = pywt.dwt2(green_channel, 'haar')
         cA, (cH, cV, cD) = coeffs
-        
+
         np.random.seed(24)
         watermark = np.random.normal(0, 1, cA.shape)
-        
+
         cA += strength * watermark
-        
+
         green_channel_watermarked = pywt.idwt2((cA, (cH, cV, cD)), 'haar')
-        image[:,:,1] = np.clip(green_channel_watermarked, 0, 255).astype(np.uint8)
-        
+        diff = len(green_channel_watermarked) - len(image)
+        green_channel_watermarked = green_channel_watermarked[:-diff]
+
+        changed = []
+        for channel in green_channel_watermarked:
+            c_diff = len(channel) - len(image[1])
+            if c_diff == 0:
+                changed.append(channel)
+            else:
+                changed.append(channel[:-c_diff])
+
+        image[:, :, 1] = np.clip(changed, 0, 255).astype(np.uint8)
+
         return image
 
     def apply_fourier_watermark(self, image, strength):
         logging.debug("Applying Fourier watermark")
-        red_channel = image[:,:,2].astype(float)
+        red_channel = image[:, :, 2].astype(float)
         f_transform = np.fft.fft2(red_channel)
-        
+
         np.random.seed(36)
         watermark = np.random.normal(0, 1, f_transform.shape)
-        
+
         f_transform += strength * watermark
-        
+
         red_channel_watermarked = np.fft.ifft2(f_transform).real
-        image[:,:,2] = np.clip(red_channel_watermarked, 0, 255).astype(np.uint8)
-        
+        image[:, :, 2] = np.clip(red_channel_watermarked, 0, 255).astype(np.uint8)
+
         return image
 
     def apply_adversarial_perturbation(self, image, epsilon):
         logging.debug("Applying adversarial perturbation")
-        
+
         # Convert image to PyTorch tensor
         img_tensor = self.preprocess(Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))).unsqueeze(0).to(self.device)
-        
+
         # Set requires_grad attribute of tensor
         img_tensor.requires_grad = True
-        
+
         # Forward pass
         output = self.model(img_tensor)
-        
+
         # Calculate loss
         loss = torch.nn.functional.cross_entropy(output, torch.tensor([0]).to(self.device))
-        
+
         # Backward pass
         loss.backward()
-        
+
         # Generate adversarial example
         data_grad = img_tensor.grad.data
         sign_data_grad = data_grad.sign()
         perturbed_image = img_tensor + epsilon * sign_data_grad
         perturbed_image = torch.clamp(perturbed_image, 0, 1)
-        
+
         # Convert back to numpy array
         perturbed_image = perturbed_image.squeeze().permute(1, 2, 0).detach().cpu().numpy()
         perturbed_image = (perturbed_image * 255).astype(np.uint8)
-        
+
         # Convert back to BGR
         perturbed_image = cv2.cvtColor(perturbed_image, cv2.COLOR_RGB2BGR)
-        
+
         return perturbed_image
 
-    def apply_color_jittering(self, image):
+    def apply_color_jittering(self, image, jitter_amount):
         logging.debug("Applying color jittering")
         # Convert to HSV
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV).astype(np.float32)
-        
+
         # Randomly adjust hue, saturation, and value
-        hsv[:,:,0] += np.random.uniform(-10, 10)  # Hue
-        hsv[:,:,1] *= np.random.uniform(0.8, 1.2)  # Saturation
-        hsv[:,:,2] *= np.random.uniform(0.8, 1.2)  # Value
-        
+        hsv[:, :, 0] += np.random.uniform(-5 * jitter_amount, 5 * jitter_amount)  # Hue
+        hsv[:, :, 1] *= np.random.uniform(1 - jitter_amount, 1 + jitter_amount)  # Saturation
+        hsv[:, :, 2] *= np.random.uniform(1 - jitter_amount, 1 + jitter_amount)  # Value
+
         # Ensure values are within valid ranges
-        hsv[:,:,0] = np.clip(hsv[:,:,0], 0, 179)
-        hsv[:,:,1] = np.clip(hsv[:,:,1], 0, 255)
-        hsv[:,:,2] = np.clip(hsv[:,:,2], 0, 255)
-        
+        hsv[:, :, 0] = np.clip(hsv[:, :, 0], 0, 255)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1], 0, 255)
+        hsv[:, :, 2] = np.clip(hsv[:, :, 2], 0, 255)
+
         # Convert back to BGR
         jittered_image = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-        
+
         return jittered_image
 
     def apply_invisible_qr(self, image, opacity):
@@ -221,21 +255,21 @@ class AdvancedImageProtector:
         qr_image = qr.make_image(fill_color="black", back_color="white")
         qr_array = np.array(qr_image.convert('L'))
         qr_array = cv2.resize(qr_array, (image.shape[1], image.shape[0]))
-        
+
         # Convert QR code to float and normalize
         qr_float = qr_array.astype(np.float32) / 255.0
-        
+
         # Apply QR code with specified opacity
         image_float = image.astype(np.float32) / 255.0
-        image_with_qr = image_float * (1 - opacity * qr_float[:,:,np.newaxis]) + opacity * qr_float[:,:,np.newaxis]
-        
+        image_with_qr = image_float * (1 - opacity * qr_float[:, :, np.newaxis]) + opacity * qr_float[:, :, np.newaxis]
+
         return (image_with_qr * 255).astype(np.uint8)
 
     def apply_steganography(self, image):
         logging.debug("Applying steganography")
         secret_message = "This image is protected"
         binary_message = ''.join(format(ord(char), '08b') for char in secret_message)
-        
+
         data_index = 0
         for i in range(image.shape[0]):
             for j in range(image.shape[1]):
@@ -280,8 +314,8 @@ class AdvancedImageProtector:
                 if len(image.shape) == 2:  # Convert grayscale to RGB
                     image = np.stack((image,)*3, axis=-1)
                 elif image.shape[2] == 4:  # Remove alpha channel if present
-                    image = image[:,:,:3]
-            
+                    image = image[:, :, :3]
+
             # Convert to BGR for OpenCV operations
             image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
@@ -311,13 +345,13 @@ class AdvancedImageProtector:
                     ),
                     hashes.SHA256()
                 )
-                
+
                 # Check timestamp
                 protection_time = datetime.fromisoformat(protection_info['timestamp'])
                 time_since_protection = datetime.now() - protection_time
                 if time_since_protection > timedelta(days=30):
                     return f"Image signature is valid, but the protection is {time_since_protection.days} days old. Consider re-protecting the image."
-                
+
                 return f"Image signature is valid. The image is authentic and was protected {time_since_protection.days} days ago."
             except:
                 return "Image signature is invalid. The image may have been tampered with."
@@ -336,19 +370,27 @@ class AdvancedImageProtector:
             yield (i + 1) / total_images  # Yield progress
         return results
 
+
 if __name__ == "__main__":
     protector = AdvancedImageProtector()
-    
+
     # Protect a single image
-    # result = protector.protect_image("path/to/your/image.jpg")
-    # print(result)
-    
+    result = protector.protect_image(sys.argv[1],
+                                     dct_strength=0.2,
+                                     wavelet_strength=0.2,
+                                     fourier_strength=0.2,
+                                     adversarial_strength=0.01,
+                                     qr_opacity=0.01,
+                                     color_jitter_amount=0.05,
+                                     noise_strength=10
+                                     )
+    print(result)
+
     # Verify a protected image
     # verification_result = protector.verify_image("path/to/protected_image.png")
     # print(verification_result)
-    
+
     # Batch process images
     # image_paths = ["path/to/image1.jpg", "path/to/image2.png", "path/to/image3.jpeg"]
     # for progress in protector.batch_process(image_paths):
     #     print(f"Progress: {progress * 100:.2f}%")
-
